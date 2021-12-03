@@ -170,12 +170,24 @@ optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 pad_idx = english.vocab.stoi['<pad']
 criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
 
+sentence = "ein boot mit mehreren männern darauf wird von einem großen pferdegespann ans ufer gezogen."
+
 if load_model:
-    load_checkpoint(torch.load('my_checkpoint.pth.ptar'), model, optimizer)
+    load_checkpoint(torch.load('my_checkpoint.pth.tar'), model, optimizer)
 
 for epoch in range(num_epochs):
     ctr = 0
     agg_loss = 0
+    model.eval()
+
+    translated_sentence = translate_sentence(
+        model, sentence, german, english, device, max_length=50
+    )
+
+    print(f"Translated example sentence: \n {translated_sentence}")
+
+    model.train()
+
     for batch_idx, batch in enumerate(train_iterator):
         input_data = batch.src.to(device)
         target = batch.trg.to(device)
