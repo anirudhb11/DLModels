@@ -44,7 +44,7 @@ class Encoder(nn.Module):
     def __init__(self, input_size, embedding_size, hidden_size, num_layers, p_drop):
         """
         :param input_size: vocabulary size
-        :param embedding_size: 
+        :param embedding_size:
         :param hidden_size: size of vectors for LSTM layers
         :param num_layers:
         :param p_drop: Dropout probability
@@ -55,7 +55,9 @@ class Encoder(nn.Module):
 
         self.dropout = nn.Dropout(p_drop)
         self.embedding = nn.Embedding(input_size, embedding_size)
-        self.rnn = nn.LSTM(embedding_size, hidden_size, num_layers, dropout=p_drop)
+        self.rnn = nn.LSTM(embedding_size, hidden_size, num_layers, bidirectional=True, dropout=p_drop)
+        self.fc_hidden = nn.Linear(hidden_size * 2, hidden_size)
+        self.fc_cell = nn.Linear(hidden_size * 2, hidden_size)
 
     def forward(self, x):
         """
@@ -64,9 +66,12 @@ class Encoder(nn.Module):
         :return: Hidden and cell state
         """
         embedding = self.dropout(self.embedding(x))  # Shape: (seq_len, bs, embedding_size)
-        outputs, (hidden, cell) = self.rnn(embedding)
-
-        return hidden, cell
+        encoder_states, (hidden, cell) = self.rnn(embedding)
+        h_reshaped = torch.cat((hidden[0:1], hidden[1:2]), dim=2)  # Shape: (1, bs, 2 * hidden_sz)
+        cell_reshaped = torch.cat((cell[0:1], cell[1:2]), dim=2)  # Shape: (1, bs, 2 * hidden_sz)
+        hidden = self.fc_hidden(h_reshaped)
+        cell = self.fc_cell(cell_reshaped)
+        return encoder_states, hidden, cell
 
 
 class Decoder(nn.Module):
@@ -86,17 +91,33 @@ class Decoder(nn.Module):
 
         self.dropout = nn.Dropout(p_drop)
         self.embedding = nn.Embedding(input_size, embedding_size)
-        self.rnn = nn.LSTM(embedding_size, hidden_size, num_layers, dropout=p_drop)
+        self.rnn = nn.LSTM(hidden_size * 2 + embedding_size, hidden_size, num_layers, dropout=p_drop)
+
+        self.energy = nn.Linear(3 * hidden_size, 1)
+        self.softmax = nn.Softmax(dim=0)
+        self.relu = nn.ReLU()
+
         self.fc = nn.Linear(hidden_size, output_size)
 
-    def forward(self, x, hidden, cell):
+    def forward(self, x, hidden, cell, encoder_states):
         # Shape of x is (bs)  we want it to be (1, bs), Given the previous hidden and cell state and the previous
         # word predicted the. So we have bs number of examples of a single word, this is in contrast with the
         # encoder where we have seq_len number of words of a batch being passed on as input
+        # hidden shape: (num_layers, bs, hidden)
+        # cell shape: (num_layers, bs, hidden)
+        # encoder_states shape: (seq_len, bs, 2 * hidden)
         x = x.unsqueeze(0)
         embedding = self.dropout(self.embedding(x))  # Shape (1, bs, emb_size)
+        seq_length = encoder_states.shape[0]
+        h_reshaped = hidden.repeat(seq_length, 1, 1)  # Shape (seq_len, bs, hidden)
+        energies = self.relu(self.energy(torch.cat((encoder_states, h_reshaped), dim=2)))  # Shape (seq_len, bs, 1)
+        attention = self.softmax(energies)
+        attention = attention.permute(1, 2, 0)  # Shape (bs, 1, seq_len)
+        encoder_states = encoder_states.permute(1, 0, 2)  # Shape (bs, seq_len, 2 * hidden)
 
-        outputs, (hidden, cell) = self.rnn(embedding, (hidden, cell))  # Output shape: (1, bs, hidden_sz)
+        context_vector = torch.bmm(attention, encoder_states).permute(1, 0, 2)  # Shape (1, bs, 2 * hidden)
+        rnn_input = torch.cat((context_vector, embedding), dim=2)
+        outputs, (hidden, cell) = self.rnn(rnn_input, (hidden, cell))  # Output shape: (1, bs, hidden_sz)
         predictions = self.fc(outputs)  # Shape: (1, bs, vocab_sz)
         predictions = predictions.squeeze(0)
 
@@ -123,12 +144,12 @@ class Seq2Seq(nn.Module):
 
         outputs = torch.zeros(target_len, batch_size, target_vocab_size).to(device)
 
-        hidden, cell = self.encoder(source)
+        encoder_states, hidden, cell = self.encoder(source)
         # Grab start token
         x = target[0]
 
         for t in range(1, target_len):
-            output, hidden, cell = self.decoder(x, hidden, cell)
+            output, hidden, cell = self.decoder(x, hidden, cell, encoder_states)
             outputs[t] = output
 
             best_guess = output.argmax(1)  # Shape: (bs)
@@ -151,7 +172,7 @@ output_size = len(english.vocab)
 encoder_embedding_size = 300
 decoder_embedding_size = 300
 hidden_size = 1024
-num_layers = 2
+num_layers = 1
 enc_dropout = 0.5
 dec_dropout = 0.5
 
